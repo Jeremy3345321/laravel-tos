@@ -1,0 +1,585 @@
+/* ============================================================
+   CvSU Naic — Table of Specification & Exam Generator
+   Design tokens: CvSU green/gold for structure & chrome,
+   a separate Bloom's Taxonomy spectrum for data encoding.
+   ============================================================ */
+
+:root {
+    /* CvSU institutional palette */
+    --cvsu-green-deep:   #0B3D2E;   /* seal field, header band */
+    --cvsu-green:        #14543F;   /* secondary structure     */
+    --cvsu-gold:         #C9A227;   /* seal lettering, accent  */
+    --cvsu-gold-bright:  #E0BC4A;   /* hover / highlight        */
+    --paper:             #FAF6EC;   /* page background          */
+    --paper-line:        #E7DFC9;   /* ruled-line / hairline    */
+    --ink:               #1E2A22;   /* primary text             */
+    --ink-soft:          #55604F;   /* secondary text           */
+    --red-pen:           #A63D42;   /* annotation / confidence  */
+
+    /* Bloom's Taxonomy spectrum — low order (cool) to high order (warm) */
+    --bloom-remembering:  #5B7F95;
+    --bloom-understanding:#6E9B7D;
+    --bloom-applying:     #C9A227;
+    --bloom-analyzing:    #C97B4A;
+    --bloom-evaluating:   #A63D42;
+    --bloom-creating:     #6B4E71;
+
+    --font-display: 'Source Serif 4', Georgia, serif;
+    --font-body: 'Inter', -apple-system, sans-serif;
+    --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
+}
+
+* { box-sizing: border-box; }
+
+body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--font-body);
+    margin: 0;
+    line-height: 1.5;
+}
+
+/* ---------- Header band: seal-inspired triangular flame mark ---------- */
+.cvsu-header {
+    background: linear-gradient(135deg, var(--cvsu-green-deep) 0%, var(--cvsu-green) 100%);
+    color: var(--paper);
+    padding: 1.75rem 2rem;
+    position: relative;
+    overflow: hidden;
+}
+
+.cvsu-header::after {
+    /* subtle triangular motif nodding to the seal's trilogy-of-functions shape */
+    content: "";
+    position: absolute;
+    right: -60px;
+    top: -60px;
+    width: 220px;
+    height: 220px;
+    background: var(--cvsu-gold);
+    opacity: 0.08;
+    clip-path: polygon(50% 0%, 100% 100%, 0% 100%);
+}
+
+.cvsu-eyebrow {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--cvsu-gold-bright);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.35rem;
+}
+
+.cvsu-eyebrow::before {
+    content: "";
+    display: inline-block;
+    width: 0;
+    height: 0;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-bottom: 8px solid var(--cvsu-gold);
+}
+
+.cvsu-header h1 {
+    font-family: var(--font-display);
+    font-size: 1.9rem;
+    font-weight: 600;
+    margin: 0;
+    color: #fff;
+}
+
+.cvsu-header p.tagline {
+    margin: 0.4rem 0 0;
+    color: #D7E4DA;
+    font-size: 0.92rem;
+    max-width: 60ch;
+}
+
+/* ---------- Page shell ---------- */
+.cvsu-page {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 2.5rem 1.5rem 4rem;
+}
+
+.cvsu-intro {
+    color: var(--ink-soft);
+    margin-bottom: 2rem;
+    max-width: 62ch;
+}
+
+/* ---------- Bloom spectrum legend ---------- */
+.bloom-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+    margin-bottom: 2.25rem;
+    padding: 0.9rem 1rem;
+    background: #fff;
+    border: 1px solid var(--paper-line);
+    border-radius: 4px;
+}
+
+.bloom-chip {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--ink-soft);
+}
+
+.bloom-chip .dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+    display: inline-block;
+}
+
+/* ---------- Form-sheet styling ---------- */
+.spec-sheet {
+    background: #fff;
+    border: 1px solid var(--paper-line);
+    border-radius: 4px;
+    padding: 2rem;
+}
+
+.field-group { margin-bottom: 1.75rem; }
+
+.field-group label {
+    display: block;
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 0.98rem;
+    margin-bottom: 0.5rem;
+    color: var(--cvsu-green-deep);
+}
+
+.field-hint {
+    font-size: 0.8rem;
+    color: var(--ink-soft);
+    margin-top: 0.4rem;
+}
+
+/* Underlined "form blank" inputs instead of boxed fields */
+.field-blank {
+    width: 100%;
+    border: none;
+    border-bottom: 1.5px solid var(--paper-line);
+    background: transparent;
+    font-family: var(--font-body);
+    font-size: 1rem;
+    padding: 0.5rem 0.1rem;
+    color: var(--ink);
+    transition: border-color 0.15s ease;
+}
+
+.field-blank:focus {
+    outline: none;
+    border-bottom-color: var(--cvsu-gold);
+}
+
+.field-blank::placeholder { color: #A8AD9E; }
+
+/* Ruled-paper textarea */
+.field-ruled {
+    width: 100%;
+    border: 1px solid var(--paper-line);
+    border-radius: 3px;
+    font-family: var(--font-mono);
+    font-size: 0.88rem;
+    padding: 0.9rem 1rem;
+    color: var(--ink);
+    background-image: repeating-linear-gradient(
+        to bottom,
+        transparent,
+        transparent 1.55rem,
+        var(--paper-line) 1.55rem,
+        var(--paper-line) calc(1.55rem + 1px)
+    );
+    background-position: 0 2.2rem;
+    line-height: 1.55rem;
+    resize: vertical;
+}
+
+.field-ruled:focus {
+    outline: none;
+    border-color: var(--cvsu-gold);
+}
+
+.field-narrow { width: 140px; }
+
+input[type="file"].field-blank {
+    border: 1px dashed var(--paper-line);
+    border-radius: 3px;
+    padding: 0.7rem 1rem;
+}
+
+/* ---------- Buttons ---------- */
+.btn-seal {
+    display: inline-block;
+    background: var(--cvsu-green-deep);
+    color: #fff;
+    border: none;
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 0.98rem;
+    padding: 0.8rem 1.75rem;
+    border-radius: 3px;
+    cursor: pointer;
+    position: relative;
+    transition: background 0.15s ease;
+}
+
+.btn-seal:hover { background: var(--cvsu-green); }
+
+.btn-seal::after {
+    content: "";
+    display: block;
+    height: 2px;
+    width: 0%;
+    background: var(--cvsu-gold);
+    transition: width 0.2s ease;
+    margin-top: 2px;
+}
+
+.btn-seal:hover::after { width: 100%; }
+
+.btn-generate {
+    background: var(--red-pen);
+}
+.btn-generate:hover { background: #8C3438; }
+
+/* ---------- Alerts ---------- */
+.alert {
+    border-radius: 4px;
+    padding: 0.9rem 1.1rem;
+    margin-bottom: 1.5rem;
+    font-size: 0.9rem;
+}
+.alert-success {
+    background: #EEF5EE;
+    border: 1px solid var(--bloom-understanding);
+    color: #2F5C3F;
+}
+.alert-error {
+    background: #FBEEEE;
+    border: 1px solid var(--red-pen);
+    color: var(--red-pen);
+}
+
+/* ---------- TOS spec grid (table) ---------- */
+.tos-grid {
+    width: 100%;
+    border-collapse: collapse;
+    background: #fff;
+    border: 1px solid var(--paper-line);
+    border-radius: 4px;
+    overflow: hidden;
+    margin-bottom: 2.5rem;
+}
+
+.tos-grid thead th {
+    background: var(--cvsu-green-deep);
+    color: var(--cvsu-gold-bright);
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    text-align: left;
+    padding: 0.75rem 1rem;
+}
+.tos-grid thead th.num { text-align: right; }
+
+.tos-grid tbody tr {
+    border-top: 1px solid var(--paper-line);
+    border-left: 4px solid var(--row-color, var(--paper-line));
+}
+
+.tos-grid td {
+    padding: 0.7rem 1rem;
+    font-size: 0.9rem;
+}
+
+.tos-grid td.level-name { font-weight: 600; color: var(--ink); }
+.tos-grid td.num {
+    text-align: right;
+    font-family: var(--font-mono);
+}
+
+.tos-grid tfoot td {
+    background: #F3EFE2;
+    font-weight: 700;
+    border-top: 2px solid var(--cvsu-green-deep);
+    padding: 0.75rem 1rem;
+}
+.tos-grid tfoot td.num { text-align: right; font-family: var(--font-mono); }
+
+/* ---------- Tabbed index cards (signature element) ---------- */
+.tab-card {
+    display: flex;
+    background: #fff;
+    border: 1px solid var(--paper-line);
+    border-radius: 3px;
+    margin-bottom: 0.6rem;
+    overflow: hidden;
+}
+
+.tab-card .tab-strip {
+    width: 8px;
+    background: var(--row-color, var(--paper-line));
+    flex-shrink: 0;
+}
+
+.tab-card .tab-body {
+    padding: 0.85rem 1rem;
+    flex: 1;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 1rem;
+}
+
+.tab-card .tab-text { font-size: 0.9rem; }
+
+.tab-card .tab-level {
+    display: inline-block;
+    margin-top: 0.35rem;
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    padding: 0.15rem 0.5rem;
+    border-radius: 2px;
+    background: color-mix(in srgb, var(--row-color, #ccc) 18%, white);
+    color: var(--row-color, var(--ink-soft));
+}
+
+.tab-card .confidence {
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    color: var(--red-pen);
+    white-space: nowrap;
+}
+
+/* ---------- Exam question cards ---------- */
+.question-card {
+    display: flex;
+    background: #fff;
+    border: 1px solid var(--paper-line);
+    border-radius: 3px;
+    margin-bottom: 0.9rem;
+    overflow: hidden;
+}
+
+.question-card .tab-strip {
+    width: 8px;
+    background: var(--row-color, var(--paper-line));
+    flex-shrink: 0;
+}
+
+.question-card .question-body {
+    padding: 1.1rem 1.25rem;
+    flex: 1;
+}
+
+.question-card .question-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 1rem;
+    margin-bottom: 0.6rem;
+}
+
+.question-card p.question-text {
+    font-weight: 600;
+    margin: 0;
+    font-size: 0.95rem;
+}
+
+.question-card .tab-level {
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    padding: 0.15rem 0.5rem;
+    border-radius: 2px;
+    background: color-mix(in srgb, var(--row-color, #ccc) 18%, white);
+    color: var(--row-color, var(--ink-soft));
+    white-space: nowrap;
+}
+
+.question-card ul.options {
+    list-style: none;
+    padding: 0;
+    margin: 0 0 0.6rem;
+    font-size: 0.88rem;
+}
+.question-card ul.options li {
+    padding: 0.25rem 0;
+    color: var(--ink-soft);
+}
+.question-card ul.options li.correct {
+    color: var(--cvsu-green-deep);
+    font-weight: 600;
+}
+
+.question-card .rationale {
+    font-size: 0.78rem;
+    color: var(--ink-soft);
+    font-style: italic;
+    border-top: 1px dashed var(--paper-line);
+    padding-top: 0.5rem;
+}
+
+/* ---------- Multi-lesson panels ---------- */
+.lesson-panel {
+    border: 1px solid var(--paper-line);
+    border-left: 4px solid var(--cvsu-gold);
+    border-radius: 3px;
+    padding: 1.25rem 1.5rem;
+    margin-bottom: 1.25rem;
+    position: relative;
+}
+
+.lesson-panel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1rem;
+}
+
+.lesson-panel-number {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--cvsu-green-deep);
+    font-weight: 600;
+}
+
+.btn-remove-lesson {
+    background: none;
+    border: none;
+    color: var(--red-pen);
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    cursor: pointer;
+    text-decoration: underline;
+    padding: 0;
+}
+
+.btn-add-lesson {
+    display: inline-block;
+    background: #fff;
+    border: 1.5px dashed var(--cvsu-green);
+    color: var(--cvsu-green-deep);
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 0.92rem;
+    padding: 0.65rem 1.25rem;
+    border-radius: 3px;
+    cursor: pointer;
+    margin-bottom: 2rem;
+}
+
+.btn-add-lesson:hover {
+    background: #F3EFE2;
+}
+
+.lesson-weight-row {
+    display: flex;
+    gap: 1.5rem;
+    align-items: flex-end;
+    margin-bottom: 1.25rem;
+}
+
+.lesson-weight-row .field-group {
+    margin-bottom: 0;
+    flex: 1;
+}
+
+.weight-hint {
+    font-size: 0.75rem;
+    color: var(--ink-soft);
+    margin-top: 0.3rem;
+}
+
+/* ---------- Per-lesson TOS breakdown (in results view) ---------- */
+.lesson-tos-block {
+    border: 1px solid var(--paper-line);
+    border-radius: 4px;
+    margin-bottom: 1.5rem;
+    overflow: hidden;
+}
+
+.lesson-tos-block-header {
+    background: #F3EFE2;
+    padding: 0.75rem 1.25rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid var(--paper-line);
+}
+
+.lesson-tos-block-header .lesson-name {
+    font-family: var(--font-display);
+    font-weight: 600;
+    color: var(--cvsu-green-deep);
+}
+
+.lesson-tos-block-header .lesson-meta {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    color: var(--ink-soft);
+}
+
+.lesson-tos-block-body {
+    padding: 1rem 1.25rem;
+}
+
+.skip-note {
+    font-size: 0.82rem;
+    color: var(--red-pen);
+    margin-top: -0.5rem;
+    margin-bottom: 1rem;
+}
+
+/* ---------- Utility ---------- */
+h2.section-title {
+    font-family: var(--font-display);
+    font-size: 1.15rem;
+    color: var(--cvsu-green-deep);
+    margin: 0 0 0.9rem;
+}
+
+.subject-line {
+    font-family: var(--font-display);
+    font-size: 1.5rem;
+    color: var(--cvsu-green-deep);
+    margin: 0 0 0.2rem;
+}
+
+.topic-line {
+    color: var(--ink-soft);
+    margin: 0 0 1.75rem;
+}
+
+/* Keyboard focus visibility */
+a:focus-visible, button:focus-visible, input:focus-visible, textarea:focus-visible {
+    outline: 2px solid var(--cvsu-gold);
+    outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; }
+}
+
+@media (max-width: 640px) {
+    .cvsu-page { padding: 1.5rem 1rem 3rem; }
+    .spec-sheet { padding: 1.25rem; }
+    .tos-grid { font-size: 0.82rem; }
+}
