@@ -3,11 +3,22 @@
 namespace App\Services\Bloom;
 
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use RuntimeException;
 
 /**
  * Generates exam questions from lesson content, constrained to match
  * a Table of Specification's per-Bloom's-level item counts.
+ *
+ * Supports THREE question types, auto-mixed per Bloom's level:
+ *   - multiple_choice      Remembering / Understanding
+ *   - modified_true_false  Applying / Analyzing / Evaluating / Creating
+ *   - enumeration          mixed in at every level as the second option
+ *
+ * The split within a level is 50/50 (largest-remainder apportioned via
+ * ApportionmentService, so it never silently drops an item). Adjust
+ * TYPE_MIX_LOWER / TYPE_MIX_HIGHER / LOWER_LEVELS below if you want a
+ * different ratio or grouping.
  *
  * Uses the Google Gemini API (free tier). Set GEMINI_API_KEY in your .env.
  * (config/services.php should have: 'gemini' => ['key' => env('GEMINI_API_KEY')])
@@ -16,6 +27,32 @@ class ExamGeneratorService
 {
     private const MODEL = 'gemini-2.5-flash-lite';
     private const API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/' . self::MODEL . ':generateContent';
+
+    /** Bloom's levels that get the "lower order" type mix. */
+    private const LOWER_LEVELS = ['Remembering', 'Understanding'];
+
+    private const TYPE_MIX_LOWER = [
+        'multiple_choice' => 0.5,
+        'enumeration' => 0.5,
+    ];
+
+    private const TYPE_MIX_HIGHER = [
+        'modified_true_false' => 0.5,
+        'enumeration' => 0.5,
+    ];
+
+    private const TYPE_LABELS = [
+        'multiple_choice' => 'Multiple Choice',
+        'modified_true_false' => 'Modified True or False',
+        'enumeration' => 'Enumeration',
+    ];
+
+    /** HTTP statuses worth retrying — rate limit and transient overload. */
+    private const RETRYABLE_STATUSES = [429, 503];
+
+    /** Max retry attempts and initial backoff (seconds, doubles each attempt). */
+    private const MAX_RETRIES = 3;
+    private const INITIAL_BACKOFF_SECONDS = 3;
 
     /**
      * Single-lesson generation (kept for backward compatibility / simple use).
@@ -27,11 +64,10 @@ class ExamGeneratorService
     public function generate(string $lessonText, array $tosDistribution, string $subject = 'General'): array
     {
         $apiKey = $this->apiKey();
-        $prompt = $this->buildPrompt($lessonText, $tosDistribution, $subject);
+        $typeCounts = $this->autoAssignTypes($tosDistribution);
+        $prompt = $this->buildPrompt($lessonText, $typeCounts, $subject);
 
-        $response = Http::withHeaders($this->headers($apiKey))
-            ->timeout(120)
-            ->post(self::API_URL, $this->body($prompt));
+        $response = $this->postWithRetry($prompt, $apiKey);
 
         if ($response->failed()) {
             throw new RuntimeException('Exam generation API call failed: ' . $response->body());
@@ -63,14 +99,18 @@ class ExamGeneratorService
         $apiKey = $this->apiKey();
 
         $lessonIds = array_keys($lessonJobs);
+        $typeCountsByLesson = [];
 
-        $responses = Http::pool(function ($pool) use ($lessonJobs, $apiKey, $course, $lessonIds) {
+        $responses = Http::pool(function ($pool) use ($lessonJobs, $apiKey, $course, $lessonIds, &$typeCountsByLesson) {
             $requests = [];
             foreach ($lessonIds as $lessonId) {
                 $job = $lessonJobs[$lessonId];
+                $typeCounts = $this->autoAssignTypes($job['level_counts']);
+                $typeCountsByLesson[$lessonId] = $typeCounts;
+
                 $prompt = $this->buildPrompt(
                     $job['lesson_text'],
-                    $job['level_counts'],
+                    $typeCounts,
                     $course,
                     $job['lesson_title'] ?? null
                 );
@@ -88,6 +128,30 @@ class ExamGeneratorService
         foreach ($lessonIds as $index => $lessonId) {
             $response = $responses[$index];
 
+            // Pooled requests fire simultaneously, which is exactly what
+            // trips a free-tier rate limit. If a lesson's request came back
+            // 429/503, retry it here ONE AT A TIME (not pooled) with
+            // backoff — sequential + delayed is far less likely to re-hit
+            // the same burst limit than firing it again alongside its
+            // siblings would be.
+            if (!($response instanceof \Throwable) && in_array($response->status(), self::RETRYABLE_STATUSES, true)) {
+                Log::info("[ExamGen] Lesson {$lessonId} hit {$response->status()} in the pool — retrying sequentially.");
+
+                $job = $lessonJobs[$lessonId];
+                $prompt = $this->buildPrompt(
+                    $job['lesson_text'],
+                    $typeCountsByLesson[$lessonId],
+                    $course,
+                    $job['lesson_title'] ?? null
+                );
+
+                try {
+                    $response = $this->postWithRetry($prompt, $apiKey);
+                } catch (\Throwable $e) {
+                    $response = $e;
+                }
+            }
+
             try {
                 if ($response instanceof \Throwable) {
                     throw $response;
@@ -103,7 +167,7 @@ class ExamGeneratorService
                 $job = $lessonJobs[$lessonId];
                 $questions = $this->backfillMissingLevels(
                     $questions,
-                    $job['level_counts'],
+                    $typeCountsByLesson[$lessonId],
                     $job['lesson_text'],
                     $course,
                     $job['lesson_title'] ?? null,
@@ -127,37 +191,89 @@ class ExamGeneratorService
     }
 
     /**
-     * Compares generated questions against the requested per-level counts.
-     * If any Bloom's level came back short (or missing entirely), fires a
-     * small follow-up request asking ONLY for the missing items and merges
-     * the results in. Runs at most 2 extra passes to avoid infinite loops
-     * if the model keeps refusing a level.
+     * Splits each Bloom's level's item quota across question types.
+     *
+     * Remembering / Understanding -> Multiple Choice + Enumeration (50/50)
+     * Applying / Analyzing / Evaluating / Creating -> Modified True-or-False + Enumeration (50/50)
+     *
+     * @param array $levelCounts Bloom level => ['item_count' => int, ...]
+     * @return array<string, array<string, int>> Bloom level => [type => count]
+     */
+    private function autoAssignTypes(array $levelCounts): array
+    {
+        $byLevel = [];
+
+        foreach ($levelCounts as $level => $d) {
+            $n = (int) ($d['item_count'] ?? 0);
+            if ($n <= 0) {
+                continue;
+            }
+
+            $mix = in_array($level, self::LOWER_LEVELS, true)
+                ? self::TYPE_MIX_LOWER
+                : self::TYPE_MIX_HIGHER;
+
+            $raw = [];
+            foreach ($mix as $type => $weight) {
+                $raw[$type] = $weight * $n;
+            }
+
+            $counts = ApportionmentService::apportion($raw, $n);
+            $counts = array_filter($counts, fn ($c) => $c > 0);
+
+            if (!empty($counts)) {
+                $byLevel[$level] = $counts;
+            }
+        }
+
+        return $byLevel;
+    }
+
+    /**
+     * Compares generated questions against the requested per-level-per-type
+     * counts. If any (level, type) combination came back short (or missing
+     * entirely), fires a small follow-up request asking ONLY for the
+     * missing items and merges the results in. Runs at most 2 extra passes
+     * to avoid infinite loops if the model keeps refusing a combination.
+     *
+     * @param array<string, array<string, int>> $typeCounts Bloom level => [type => count]
      */
     private function backfillMissingLevels(
         array $questions,
-        array $levelCounts,
+        array $typeCounts,
         string $lessonText,
         string $course,
         ?string $lessonTitle,
         string $apiKey
     ): array {
         for ($pass = 0; $pass < 2; $pass++) {
-            $have = collect($questions)->countBy('bloom_level');
+            $have = collect($questions)->countBy(
+                fn ($q) => ($q['bloom_level'] ?? '') . '|' . ($q['question_type'] ?? 'multiple_choice')
+            );
 
-            $missing = collect($levelCounts)
-                ->filter(fn ($d) => ($d['item_count'] ?? 0) > 0)
-                ->mapWithKeys(fn ($d, $level) => [
-                    $level => max(0, ($d['item_count'] ?? 0) - ($have[$level] ?? 0)),
-                ])
-                ->filter(fn ($n) => $n > 0);
+            $missing = [];
+            foreach ($typeCounts as $level => $types) {
+                foreach ($types as $type => $n) {
+                    $got = $have[$level . '|' . $type] ?? 0;
+                    $need = max(0, $n - $got);
+                    if ($need > 0) {
+                        $missing[$level][$type] = $need;
+                    }
+                }
+            }
 
-            if ($missing->isEmpty()) {
+            if (empty($missing)) {
                 break;
             }
 
-            $missingBreakdown = $missing
-                ->map(fn ($n, $level) => "- {$level}: {$n} item(s)")
-                ->implode("\n");
+            $lines = [];
+            foreach ($missing as $level => $types) {
+                foreach ($types as $type => $n) {
+                    $label = self::TYPE_LABELS[$type] ?? $type;
+                    $lines[] = "- {$level} ({$label}): {$n} item(s)";
+                }
+            }
+            $missingBreakdown = implode("\n", $lines);
 
             $titleLine = $lessonTitle ? "LESSON: {$lessonTitle}\n" : '';
 
@@ -171,29 +287,21 @@ LESSON CONTENT:
 {$lessonText}
 ---
 
-A previous pass failed to generate questions for these specific Bloom's Taxonomy levels. Generate ONLY these now, exactly this many, with NO exceptions and NO empty results:
+A previous pass failed to generate questions for these specific Bloom's Taxonomy level + question type combinations. Generate ONLY these now, exactly this many, with NO exceptions and NO empty results:
 {$missingBreakdown}
 
-Even for higher-order levels like Analyzing, Evaluating, or Creating on basic content, write your best-effort question that reasonably applies, compares, judges, or extends the lesson concepts. Do not skip any requested level.
+Even for higher-order levels like Analyzing, Evaluating, or Creating on basic content, write your best-effort question that reasonably applies, compares, judges, or extends the lesson concepts. Do not skip any requested combination.
+
+{$this->typeSchemaInstructions()}
 
 Return ONLY valid JSON, no markdown fences, matching:
 {
-  "questions": [
-    {
-      "bloom_level": "...",
-      "question": "...",
-      "options": {"A": "...", "B": "...", "C": "...", "D": "..."},
-      "correct_answer": "A",
-      "rationale": "..."
-    }
-  ]
+  "questions": [ /* mixed question_type objects as described above */ ]
 }
 PROMPT;
 
             try {
-                $response = Http::withHeaders($this->headers($apiKey))
-                    ->timeout(120)
-                    ->post(self::API_URL, $this->body($prompt));
+                $response = $this->postWithRetry($prompt, $apiKey);
 
                 if ($response->failed()) {
                     break;
@@ -213,6 +321,48 @@ PROMPT;
         }
 
         return $questions;
+    }
+
+    /**
+     * Single sequential POST with exponential-backoff retry for rate-limit
+     * (429) or transient overload (503) responses, and for network-level
+     * connection exceptions. Not used inside the Http::pool() closure
+     * itself (pool requests must stay non-blocking) — only for the
+     * single-lesson path, the backfill pass, and the sequential retry of
+     * pool responses that came back retryable.
+     */
+    private function postWithRetry(string $prompt, string $apiKey): \Illuminate\Http\Client\Response
+    {
+        $attempt = 0;
+        $delay = self::INITIAL_BACKOFF_SECONDS;
+
+        while (true) {
+            try {
+                $response = Http::withHeaders($this->headers($apiKey))
+                    ->timeout(120)
+                    ->post(self::API_URL, $this->body($prompt));
+            } catch (\Throwable $e) {
+                $response = null;
+            }
+
+            $retryable = $response === null || in_array($response->status(), self::RETRYABLE_STATUSES, true);
+
+            if (!$retryable || $attempt >= self::MAX_RETRIES) {
+                if ($response === null) {
+                    throw new RuntimeException('Exam generation API call failed with a network/connection error after retries.');
+                }
+
+                return $response;
+            }
+
+            $attempt++;
+            Log::info('[ExamGen] Retrying Gemini call after '
+                . ($response ? $response->status() : 'a connection error')
+                . " (attempt {$attempt}/" . self::MAX_RETRIES . "), waiting {$delay}s.");
+
+            sleep($delay);
+            $delay *= 2;
+        }
     }
 
     private function apiKey(): string
@@ -264,14 +414,64 @@ PROMPT;
         return $text;
     }
 
-    private function buildPrompt(string $lessonText, array $levelCounts, string $subject, ?string $lessonTitle = null): string
+    /**
+     * Shared JSON-schema explanation for all three question types, reused
+     * by both the main prompt and the backfill prompt.
+     */
+    private function typeSchemaInstructions(): string
     {
-        $itemBreakdown = collect($levelCounts)
-            ->filter(fn ($d) => ($d['item_count'] ?? 0) > 0)
-            ->map(fn ($d, $level) => "- {$level}: {$d['item_count']} item(s)")
-            ->implode("\n");
+        return <<<TXT
+Each question object's shape depends on its "question_type":
 
-        $totalItems = collect($levelCounts)->sum('item_count');
+1. "multiple_choice":
+{
+  "question_type": "multiple_choice",
+  "bloom_level": "Remembering",
+  "question": "...",
+  "options": {"A": "...", "B": "...", "C": "...", "D": "..."},
+  "correct_answer": "A",
+  "rationale": "short reason why this tests this Bloom's level"
+}
+
+2. "modified_true_false": statement to be judged true or false. If false,
+   "correction" MUST contain the corrected version of the statement so it
+   would then be true. If true, set "correction" to null.
+{
+  "question_type": "modified_true_false",
+  "bloom_level": "Applying",
+  "question": "the statement to evaluate",
+  "is_true": false,
+  "correction": "the corrected statement (or null if is_true is true)",
+  "rationale": "short reason why this tests this Bloom's level"
+}
+
+3. "enumeration": a prompt asking students to list items; "accepted_answers"
+   is the full list of correct items expected (in any order).
+{
+  "question_type": "enumeration",
+  "bloom_level": "Understanding",
+  "question": "the enumeration prompt, e.g. 'Enumerate the three branches of government.'",
+  "accepted_answers": ["...", "...", "..."],
+  "rationale": "short reason why this tests this Bloom's level"
+}
+TXT;
+    }
+
+    /**
+     * @param array<string, array<string, int>> $typeCounts Bloom level => [type => count]
+     */
+    private function buildPrompt(string $lessonText, array $typeCounts, string $subject, ?string $lessonTitle = null): string
+    {
+        $lines = [];
+        $totalItems = 0;
+        foreach ($typeCounts as $level => $types) {
+            foreach ($types as $type => $n) {
+                $label = self::TYPE_LABELS[$type] ?? $type;
+                $lines[] = "- {$level} ({$label}): {$n} item(s)";
+                $totalItems += $n;
+            }
+        }
+        $itemBreakdown = implode("\n", $lines);
 
         $titleLine = $lessonTitle ? "LESSON: {$lessonTitle}\n" : '';
 
@@ -285,26 +485,19 @@ LESSON CONTENT (source material to base questions on):
 {$lessonText}
 ---
 
-Generate exactly {$totalItems} multiple-choice exam questions based ONLY on the lesson content above, distributed EXACTLY as follows across Bloom's Taxonomy levels:
+Generate exactly {$totalItems} exam questions based ONLY on the lesson content above, distributed EXACTLY as follows across Bloom's Taxonomy level AND question type:
 {$itemBreakdown}
 
 Rules:
 1. Each question must genuinely require thinking at its assigned Bloom's level (e.g. "Analyzing" questions must require breaking down/comparing/relating ideas, not just recall).
-2. Each question must have exactly 4 options (A-D), one correct answer, and be answerable strictly from the lesson content provided.
+2. Each question must be answerable strictly from the lesson content provided.
 3. Do not repeat concepts across questions unnecessarily; spread coverage across the lesson.
-4. IMPORTANT: You must generate the exact requested count for EVERY Bloom's level listed, even for higher levels like Analyzing, Evaluating, or Creating on introductory/definitional content. If the lesson content is basic, write higher-level questions that ask students to apply, compare, judge the usefulness of, or extend the concepts in the lesson (e.g. "Which scenario would benefit most from X over Y?" for Evaluating, or "Design a modification to X that would achieve Y" for Creating). Do NOT return an empty "questions" array and do NOT skip any level under any circumstance — always produce your best-effort question for every requested item.
-5. Return ONLY valid JSON (no markdown fences, no preamble, no explanation) matching this exact structure:
+4. IMPORTANT: You must generate the exact requested count for EVERY level+type combination listed, even for higher levels like Analyzing, Evaluating, or Creating on introductory/definitional content. If the lesson content is basic, write higher-level questions that ask students to apply, compare, judge the usefulness of, or extend the concepts in the lesson. Do NOT return an empty "questions" array and do NOT skip any requested combination under any circumstance — always produce your best-effort question for every requested item.
+5. {$this->typeSchemaInstructions()}
+6. Return ONLY valid JSON (no markdown fences, no preamble, no explanation) matching this exact structure:
 
 {
-  "questions": [
-    {
-      "bloom_level": "Remembering",
-      "question": "...",
-      "options": {"A": "...", "B": "...", "C": "...", "D": "..."},
-      "correct_answer": "A",
-      "rationale": "short reason why this tests this Bloom's level"
-    }
-  ]
+  "questions": [ /* mixed question_type objects per the schemas above, exactly matching the requested counts */ ]
 }
 PROMPT;
     }
@@ -318,10 +511,55 @@ PROMPT;
 
         $decoded = json_decode($clean, true);
 
-        if (json_last_error() !== JSON_ERROR_NONE || !isset($decoded['questions'])) {
+        if (json_last_error() !== JSON_ERROR_NONE || !isset($decoded['questions']) || !is_array($decoded['questions'])) {
+            // TEMP DIAGNOSTIC — remove once the mismatch is found.
+            Log::warning('[ExamGen] Failed to parse questions JSON at all.', [
+                'json_error' => json_last_error_msg(),
+                'raw_snippet' => substr($clean, 0, 2000),
+            ]);
             throw new RuntimeException('Failed to parse exam questions JSON from model response.');
         }
 
-        return $decoded['questions'];
+        // TEMP DIAGNOSTIC — remove once the mismatch is found.
+        Log::info('[ExamGen] Raw questions before validation filter.', [
+            'count_raw' => count($decoded['questions']),
+            'items' => $decoded['questions'],
+        ]);
+
+        // Filter out any individual items that don't match their declared
+        // question_type's required shape, rather than failing the whole
+        // batch — the backfill pass will pick up the slack for whatever
+        // gets dropped here.
+        $valid = array_values(array_filter($decoded['questions'], [$this, 'isValidQuestion']));
+
+        // TEMP DIAGNOSTIC — remove once the mismatch is found.
+        $rejected = array_values(array_filter($decoded['questions'], fn ($q) => !$this->isValidQuestion($q)));
+        if (!empty($rejected)) {
+            Log::warning('[ExamGen] Some items were rejected by isValidQuestion.', [
+                'count_raw' => count($decoded['questions']),
+                'count_valid' => count($valid),
+                'rejected' => $rejected,
+            ]);
+        }
+
+        return $valid;
+    }
+
+    private function isValidQuestion(mixed $q): bool
+    {
+        if (!is_array($q) || empty($q['bloom_level']) || empty($q['question'])) {
+            return false;
+        }
+
+        $type = $q['question_type'] ?? 'multiple_choice';
+
+        return match ($type) {
+            'multiple_choice' => isset($q['options']['A'], $q['options']['B'], $q['options']['C'], $q['options']['D'])
+                && !empty($q['correct_answer']),
+            'modified_true_false' => array_key_exists('is_true', $q)
+                && ($q['is_true'] === true || !empty($q['correction'])),
+            'enumeration' => !empty($q['accepted_answers']) && is_array($q['accepted_answers']),
+            default => false,
+        };
     }
 }
